@@ -1,0 +1,156 @@
+import numpy as np
+import torch
+import heapq
+from numba import njit, prange
+import utils
+
+
+class Scapin:
+    def __init__(self, adj, features, labels, split_idx, _ptb_rate, _device, _th):
+        self.node_cnt_score = None
+        self.node_degree = None
+        self.adj_norm_lil = None
+        self.degree_heap = None
+        self.node_cnt_sum = None
+        self.receptive_vector = None
+        self.num_ones = None
+        self.adj_lil = None
+        self.init_activate_value = None  # numpy array
+        self.ptb_rate = _ptb_rate
+        self.device = _device
+        self.train_idx = split_idx["train"]  # numpy array
+        self.valid_idx = split_idx["valid"]  # numpy array
+        self.test_idx = split_idx["test"]  # numpy array
+        self.features = features  # numpy array
+        self.features_torch = torch.tensor(self.features)  # torch array of features
+        self.labels = labels  # numpy array
+        self.num_nodes = len(self.labels)  # int, # of nodes
+        self.labels_torch = torch.tensor(self.labels, dtype=torch.int64)  # torch array of labels
+        self.adj_sp = adj.tocoo()  # scipy.sparse coo matrix
+        self.adj_torch = utils.sparse_mx_to_torch_sparse_tensor(self.adj_sp)  # torch sparse coo matrix
+        self.adj_norm_sp = utils.aug_normalized_adjacency(self.adj_sp)  # scipy.sparse coo matrix
+        self.adj_norm_torch = utils.sparse_mx_to_torch_sparse_tensor(self.adj_norm_sp)  # torch sparse coo matrix
+        degree_torch = torch.sparse.sum(self.adj_torch, dim=0).values()
+        self.deg = np.array(degree_torch)  # numpy array
+        self.ptb_num = int(self.deg.sum() // 2 * self.ptb_rate)
+        self.th = _th
+
+    def get_min_unconnected_node(self, heap_, selected_node):
+        tmp_list = []
+        res_node = 0
+        while True:
+            tmp_node = heapq.heappop(heap_)
+            tmp_list.append(tmp_node)
+            if self.adj_lil[selected_node, tmp_node[1]] == 0:
+                res_node = tmp_node[1]
+                break
+        for i in range(len(tmp_list)):
+            heapq.heappush(heap_, tmp_list[i])
+        return res_node
+
+    @staticmethod
+    @njit
+    def try_add_edge(node_cnt_sum, K, col, data, th):
+        delta = 0
+        for i in range(len(col)):
+            if node_cnt_sum[col[i]] <= th < K * data[i]:
+                delta = delta + 1
+        return delta
+
+    @staticmethod
+    def exec_add_edge(node_cnt_sum, K, col, data):
+        for tx in prange(col.size):
+            if node_cnt_sum[col[tx]] < K * data[tx]:
+                node_cnt_sum[col[tx]] = K * data[tx]
+
+    @staticmethod
+    def prep_cnt_sum(node_cnt_sum, K_arr, row, col, data):
+        for tx in prange(col.size):
+            if node_cnt_sum[col[tx]] < K_arr[row[tx]] * data[tx]:
+                node_cnt_sum[col[tx]] = K_arr[row[tx]] * data[tx]
+
+    def get_min_unconnected_node_and_add(self, heap_, selected_node):
+        tmp_list = []
+        res_node = 0
+        tmp_node = 0
+        while True:
+            tmp_node = heapq.heappop(heap_)
+            if self.adj_lil[selected_node, tmp_node[1]] == 1:
+                tmp_list.append(tmp_node)
+            if self.adj_lil[selected_node, tmp_node[1]] == 0:
+                res_node = tmp_node[1]
+                tmp_list.append((tmp_node[0] + 1, tmp_node[1]))
+                break
+        for i in range(len(tmp_list)):
+            heapq.heappush(heap_, tmp_list[i])
+        return res_node
+
+    def get_max_score_node(self, heap_):
+        max_node = 0
+        max_node_score = 0
+        tmp_node1 = heapq.heappop(heap_)
+        while True:
+            from_node = self.get_min_unconnected_node(self.degree_heap, tmp_node1[2])
+            cur_row_coo = self.adj_norm_lil[tmp_node1[2]].tocoo()
+            update_tmp_node1_score = - self.try_add_edge(self.node_cnt_sum,
+                                                         1 / (self.node_degree[from_node] + 1),
+                                                         cur_row_coo.col, cur_row_coo.data, self.th)
+            count = - update_tmp_node1_score + self.node_cnt_score
+            tmp_node2 = heapq.heappop(heap_)
+            if update_tmp_node1_score > tmp_node2[0]:
+                heapq.heappush(heap_, (update_tmp_node1_score, tmp_node1[1], tmp_node1[2]))
+                tmp_node1 = tmp_node2
+            if update_tmp_node1_score <= tmp_node2[0]:
+                heapq.heappush(heap_, tmp_node2)
+                max_node = tmp_node1[2]
+                max_node_score = count
+                break
+        return max_node, max_node_score
+
+    def attack(self):
+        self.node_cnt_sum = np.zeros(self.num_nodes)
+        self.degree_heap = []
+        score_heap = []
+        self.adj_lil = self.adj_sp.tolil()
+        self.adj_norm_lil = self.adj_norm_sp.tolil()
+        idx_train_list = self.train_idx.tolist()
+        self.num_ones = np.ones(self.num_nodes)
+        node_cnt = np.array(self.adj_norm_lil[idx_train_list].tocsr().max(axis=0).todense()).flatten()
+        for i in idx_train_list:
+            node_cnt[i] = 1
+        self.node_degree = torch.sparse.sum(self.adj_torch.to(self.device), [0]).to_dense().cpu().numpy()
+
+        for i in idx_train_list:
+            heapq.heappush(self.degree_heap, (self.node_degree[i], i))
+
+        self.prep_cnt_sum(self.node_cnt_sum, node_cnt, self.adj_norm_sp.row, self.adj_norm_sp.col,
+                          self.adj_norm_sp.data)
+
+        self.receptive_vector = (self.node_cnt_sum > self.th) + 0
+        self.node_cnt_score = self.num_ones.dot(self.receptive_vector)
+        TAT = np.arange(self.num_nodes)
+        for _ in range(self.num_nodes):
+            i = TAT[_]
+            from_node = self.get_min_unconnected_node(self.degree_heap, i)
+            cur_row_coo = self.adj_norm_lil[i].tocoo()
+            delta = self.try_add_edge(self.node_cnt_sum,
+                                      1 / (self.node_degree[from_node] + 1),
+                                      cur_row_coo.col, cur_row_coo.data, self.th)
+            heapq.heappush(score_heap, (-delta, _, i))
+
+        num_count = 0
+        add_res_list = []
+        while True:
+            to_node, self.node_cnt_score = self.get_max_score_node(score_heap)
+            from_node = self.get_min_unconnected_node_and_add(self.degree_heap, to_node)
+            self.node_degree[from_node] += 1
+            self.adj_lil[from_node, to_node] = 1
+            self.adj_lil[to_node, from_node] = 1
+            add_res_list.append([from_node, self.labels[from_node], to_node, self.labels[to_node], self.node_cnt_score])
+            num_count += 1
+            cur_row_coo = self.adj_norm_lil[to_node].tocoo()
+            self.exec_add_edge(self.node_cnt_sum, 1 / self.node_degree[from_node], cur_row_coo.col, cur_row_coo.data)
+            if num_count >= self.ptb_num:
+                break
+
+        return self.adj_lil.copy()
