@@ -124,3 +124,21 @@ def test(adj, features, labels, train_idx, val_idx, test_idx, device):
           "loss= {:.4f}".format(loss_test.item()),
           "accuracy= {:.4f}".format(acc_test.item()))
     return acc_test.item()
+
+
+def check_th(dataset, th):
+    if th != -1 and type(th) == float:
+        return th
+    elif th == -1:
+        if dataset == 'cora':
+            return 0.002
+        elif dataset == 'cora_ml':
+            return 0.084
+        elif dataset == 'citeseer':
+            return 0.05
+        elif dataset == 'cs':
+            return 0.07
+        else:
+            raise NotImplementedError
+    else:
+        raise AttributeError
