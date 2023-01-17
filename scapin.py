@@ -12,37 +12,29 @@ from models import lpa, gcn
 
 class Scapin:
     @staticmethod
-    def generate(adj: scipy.sparse.spmatrix, features: numpy.ndarray, labels: numpy.ndarray, split_idx: dict,
-                 ptb_rate: float, th: float, seed: int, device: str) -> scipy.sparse.lil_matrix:
+    def generate(adj: scipy.sparse.spmatrix, split_idx: dict,
+                 ptb_rate: float, th: float) -> scipy.sparse.lil_matrix:
         """
         Generate attacked graph using Scapin method.
 
         Args:
             adj: the original adjacency matrix in scipy sparse matrix format
-            features: 2D numpy array, i-th row representing the feature of i-th node
-            labels: numpy array
             split_idx: built-in dictionary with "train", "valid", "test" as its key,
                        each containing a built-in list of idx
             ptb_rate: built-in float number (0, 1), the perturb rate
             th: built-in float number, the parameter of Scapin method
-            seed: built-in integer, the random seed
-            device: built-in string, the pytorch device, default='cpu',
-                    see https://pytorch.org/docs/stable/tensor_attributes.html#torch.device
 
         Returns:
             the perturbed adjacency matrix in scipy sparse lil format
         """
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if device != 'cpu':
-            torch.cuda.manual_seed(seed)
-        worker = Scapin.ScapinExec(adj=adj, features=features, labels=labels, split_idx=split_idx,
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        worker = Scapin.ScapinExec(adj=adj, split_idx=split_idx,
                                    _ptb_rate=ptb_rate, _th=th, _device=device)
         return worker.attack()
 
     @staticmethod
     def evaluate(adj: scipy.sparse.spmatrix, features: numpy.ndarray, labels: numpy.ndarray, split_idx: dict,
-                 method: str, seed: int, device: str) -> float:
+                 model: str) -> float:
         """
         Evaluate a graph on a specific node classification method once.
 
@@ -54,30 +46,25 @@ class Scapin:
                        each containing a built-in list of idx
             method: built-in string, 'LPA' or 'GCN', representing the method, default='LBA'
             seed: integer, the random seed for evaluation, default=9
-            device: built-in string, the pytorch device, default='cpu',
-                    see https://pytorch.org/docs/stable/tensor_attributes.html#torch.device
 
         Returns:
             the accuracy metric
         """
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if device != 'cpu':
-            torch.cuda.manual_seed(seed)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         features_torch = torch.tensor(features)
         labels_torch = torch.tensor(labels)
-        if method == "LPA":
-            model = lpa
-        elif method == "GCN":
-            model = gcn
+        if model == "LPA":
+            m_r = lpa
+        elif model == "GCN":
+            m_r = gcn
         else:
             raise NotImplementedError
-        res = model.test(utils.sparse_mx_to_torch_sparse_tensor(adj), features_torch,
+        res = m_r.test(utils.sparse_mx_to_torch_sparse_tensor(adj), features_torch,
                          labels_torch, split_idx, device)
         return res
 
     class ScapinExec:
-        def __init__(self, adj, features, labels, split_idx, _ptb_rate, _device, _th):
+        def __init__(self, adj, split_idx, _ptb_rate, _device, _th):
             self.node_cnt_score = None
             self.node_degree = None
             self.adj_norm_lil = None
@@ -92,12 +79,8 @@ class Scapin:
             self.train_idx = split_idx["train"]  # numpy array
             self.valid_idx = split_idx["valid"]  # numpy array
             self.test_idx = split_idx["test"]  # numpy array
-            self.features = features  # numpy array
-            self.features_torch = torch.tensor(self.features)  # torch array of features
-            self.labels = labels  # numpy array
-            self.num_nodes = len(self.labels)  # int, # of nodes
-            self.labels_torch = torch.tensor(self.labels, dtype=torch.int64)  # torch array of labels
             self.adj_sp = adj.tocoo()  # scipy.sparse coo matrix
+            self.num_nodes = self.adj_sp.get_shape()[0]  # int, # of nodes
             self.adj_torch = utils.sparse_mx_to_torch_sparse_tensor(self.adj_sp)  # torch sparse coo matrix
             self.adj_norm_sp = utils.aug_normalized_adjacency(self.adj_sp)  # scipy.sparse coo matrix
             self.adj_norm_torch = utils.sparse_mx_to_torch_sparse_tensor(self.adj_norm_sp)  # torch sparse coo matrix
@@ -217,8 +200,6 @@ class Scapin:
                 self.node_degree[from_node] += 1
                 self.adj_lil[from_node, to_node] = 1
                 self.adj_lil[to_node, from_node] = 1
-                add_res_list.append(
-                    [from_node, self.labels[from_node], to_node, self.labels[to_node], self.node_cnt_score])
                 num_count += 1
                 cur_row_coo = self.adj_norm_lil[to_node].tocoo()
                 self.__exec_add_edge(self.node_cnt_sum, 1 / self.node_degree[from_node], cur_row_coo.col,
