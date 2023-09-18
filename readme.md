@@ -2,12 +2,27 @@
 
 The repository contains the implementation of our proposed Scapin method.
 
+System software requirement:
+
+- Ubuntu 16.04 or higher
+- `g++` 5.4.0 or higher
+- `conda` 4.11.0 or higher, the package manager for Python which installs all other dependencies
+- For GPU acceleration, `cuda` 10.2 or higher and the corresponding version of PyTorch 1.8.1 or higher
+
+You may install `g++` by executing `apt install g++`
+
+You may install `conda` by following the instructions on https://docs.conda.io/projects/miniconda/en/latest/index.html#quick-command-line-install
+
 To set up the environment:
 
 ```bash
 conda create -n scapin python=3.9
+conda activate scapin
 pip install -r requirements.txt
+pip install torchmetrics==1.0
 ```
+
+You may need to install the cuda-enabled version of PyTorch manually for GPU acceleration.
 
 The library provides two main methods: `generate` (perturbation generation) and `evaluate` (node classification evaluation).
 
